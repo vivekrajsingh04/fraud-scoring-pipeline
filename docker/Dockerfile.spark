@@ -1,0 +1,76 @@
+# Official Apache Spark image, published for both arm64 and amd64, so this runs
+# natively on Apple silicon and on CI runners alike.
+#
+# NOT bitnami/spark: Bitnami withdrew their public Spark images and every tag now
+# fails to resolve ("docker.io/bitnami/spark:3.5.1: not found").
+#
+# The java17 variant is used so the executor JVM matches the Java 17 this project
+# targets everywhere else, rather than the default image's Java 11.
+ARG BASE_IMAGE=apache/spark:3.5.1-java17-python3
+FROM ${BASE_IMAGE}
+
+USER root
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+# Kafka connector, baked in at build time rather than resolved with --packages.
+#
+# --packages makes spark-submit run an Ivy resolution on every container start.
+# In this image that fails outright -- the process runs as uid 185 whose home is
+# not writable, so Ivy dies on
+# "/home/spark/.ivy2/cache/resolved-...xml (No such file or directory)" and the
+# job crash-loops. Baking the jars also means startup needs no network and the
+# exact versions are pinned rather than resolved afresh each time.
+#
+# This is the full runtime dependency set of spark-sql-kafka-0-10_2.12:3.5.1;
+# everything else it needs (lz4, snappy, slf4j) already ships with Spark.
+# ---------------------------------------------------------------------------
+ARG SPARK_VERSION=3.5.1
+ARG SCALA_VERSION=2.12
+ARG KAFKA_CLIENTS_VERSION=3.4.1
+ARG COMMONS_POOL2_VERSION=2.11.1
+ARG MAVEN=https://repo1.maven.org/maven2
+
+RUN set -eux; \
+    for jar in \
+      "org/apache/spark/spark-sql-kafka-0-10_${SCALA_VERSION}/${SPARK_VERSION}/spark-sql-kafka-0-10_${SCALA_VERSION}-${SPARK_VERSION}.jar" \
+      "org/apache/spark/spark-token-provider-kafka-0-10_${SCALA_VERSION}/${SPARK_VERSION}/spark-token-provider-kafka-0-10_${SCALA_VERSION}-${SPARK_VERSION}.jar" \
+      "org/apache/kafka/kafka-clients/${KAFKA_CLIENTS_VERSION}/kafka-clients-${KAFKA_CLIENTS_VERSION}.jar" \
+      "org/apache/commons/commons-pool2/${COMMONS_POOL2_VERSION}/commons-pool2-${COMMONS_POOL2_VERSION}.jar" \
+    ; do \
+      curl -fsSL "${MAVEN}/${jar}" -o "/opt/spark/jars/$(basename "${jar}")"; \
+    done
+
+# The source tree goes on PYTHONPATH rather than being pip-installed. The
+# streaming job only imports fraudpipe.features/schemas/config/common, all pure
+# stdlib, so the executors need none of the serving dependencies -- and the
+# image's working pandas/numpy/Arrow pin is left undisturbed.
+COPY src ./src
+ENV PYTHONPATH=/app/src \
+    SPARK_HOME=/opt/spark \
+    HOME=/tmp
+
+# pandas and pyarrow drive applyInPandasWithState, and this image ships neither.
+# Installed WITHOUT version pins on purpose: the image carries a numpy that
+# Spark's Arrow bridge is built against, and letting pip resolve compatible
+# pandas/pyarrow on top of it is safer than forcing this project's ranges and
+# swapping that numpy out underneath Spark.
+RUN pip install --no-cache-dir pandas pyarrow \
+ && python3 -c "import sys, pandas, pyarrow; print('python', sys.version.split()[0], '/ pandas', pandas.__version__, '/ pyarrow', pyarrow.__version__)" \
+ && chown -R 185 /app
+
+# Import the shared feature module at build time. If the executor runtime cannot
+# load it -- a syntax or stdlib feature newer than the image's Python -- the
+# build fails here rather than at 3am in a crash-looping streaming job. This has
+# already caught dataclass(slots=) and a ruff-introduced datetime.UTC.
+#
+# pyspark ships as source under /opt/spark/python rather than pip-installed, and
+# spark-submit puts it on the path itself at runtime. A plain python3 needs it
+# spelled out, including the py4j zip whose version is part of its filename.
+RUN set -eux; \
+    PY4J="$(ls /opt/spark/python/lib/py4j-*-src.zip | head -n1)"; \
+    PYTHONPATH="/app/src:/opt/spark/python:${PY4J}" python3 -c "\
+import fraudpipe.features.core, fraudpipe.schemas, fraudpipe.streaming.job; \
+print('shared feature module imports cleanly on the executor runtime')"
+
+USER 185

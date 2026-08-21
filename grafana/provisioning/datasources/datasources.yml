@@ -1,0 +1,22 @@
+apiVersion: 1
+
+datasources:
+  # Prometheus carries the latency histograms and throughput counters.
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  # Postgres carries the decisions themselves, so model-quality panels
+  # (precision, recall, alert rate) query the same rows an analyst would.
+  - name: Decisions
+    type: postgres
+    url: postgres:5432
+    database: fraud
+    user: fraud
+    secureJsonData:
+      password: fraud
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600

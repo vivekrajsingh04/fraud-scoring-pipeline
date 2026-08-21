@@ -1,0 +1,287 @@
+{
+  "uid": "fraudpipe-main",
+  "title": "Fraud scoring pipeline",
+  "tags": [
+    "fraud",
+    "streaming"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "End-to-end latency (event time -> decision)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "The 200ms SLO is measured on this series, not on inference time alone.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(fraudpipe_e2e_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fraudpipe_e2e_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(fraudpipe_e2e_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Model inference latency",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(fraudpipe_score_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(fraudpipe_score_latency_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Throughput (decisions/sec)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(fraudpipe_decisions_total[1m])) by (decision)",
+          "legendFormat": "{{decision}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Alert rate (review budget consumed)",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Fraction of traffic sent to manual review. The cost-optimal threshold targets ~0.5%.",
+      "targets": [
+        {
+          "expr": "sum(rate(fraudpipe_decisions_total{decision=\"REVIEW\"}[5m])) / clamp_min(sum(rate(fraudpipe_decisions_total[5m])), 0.0001)",
+          "legendFormat": "alert rate",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Decisions landed in Postgres",
+      "type": "stat",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "decisions"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT count(*) AS decisions FROM decisions",
+          "rawQuery": true,
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "decisions"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Live confusion matrix (labelled traffic)",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "decisions"
+      },
+      "description": "Labels arrive with the replayed dataset, so quality is observable live -- which is not true in production, where labels lag by the chargeback window.",
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT * FROM decision_quality",
+          "rawQuery": true,
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "decisions"
+          }
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Precision / recall at the deployed threshold",
+      "type": "table",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "decisions"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT\n  round((true_positives::numeric / NULLIF(true_positives + false_positives, 0)) * 100, 2) AS precision_pct,\n  round((true_positives::numeric / NULLIF(true_positives + false_negatives, 0)) * 100, 2) AS recall_pct,\n  true_positives, false_positives, false_negatives\nFROM decision_quality",
+          "rawQuery": true,
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "decisions"
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "End-to-end latency measured in the database",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "decisions"
+      },
+      "description": "Independent check on the Prometheus histogram: computed from stored timestamps rather than from in-process instrumentation.",
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT $__timeGroupAlias(scored_at, '10s'),\n  percentile_cont(0.50) WITHIN GROUP (ORDER BY e2e_latency_ms) AS p50_ms,\n  percentile_cont(0.95) WITHIN GROUP (ORDER BY e2e_latency_ms) AS p95_ms,\n  percentile_cont(0.99) WITHIN GROUP (ORDER BY e2e_latency_ms) AS p99_ms\nFROM decision_latency WHERE $__timeFilter(scored_at)\nGROUP BY 1 ORDER BY 1",
+          "rawQuery": true,
+          "refId": "A",
+          "datasource": {
+            "type": "postgres",
+            "uid": "decisions"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

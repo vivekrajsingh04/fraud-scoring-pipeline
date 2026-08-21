@@ -1,0 +1,30 @@
+# Shared base for the replayer and the scorer. Both are pure Python and need the
+# same package, so one image with different entrypoints keeps builds cached.
+#
+# The platform is chosen by docker-compose (TARGET_PLATFORM, default linux/arm64),
+# not baked in here -- hardcoding arm64 would force qemu emulation on amd64 CI.
+ARG BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${BASE_IMAGE}
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir -e .
+
+COPY scripts ./scripts
+
+# Non-root: the scorer is the only service exposed to a network, so it should
+# not be the one running as uid 0.
+RUN useradd --create-home --uid 10001 app && chown -R app /app
+USER app
+
+CMD ["python", "-c", "print('specify a command')"]

@@ -1,0 +1,114 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fraudpipe"
+version = "0.1.0"
+description = "Real-time card-fraud scoring with point-in-time-correct features"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pandas>=2.1,<3",
+    "numpy>=1.26,<2",
+    "pyarrow>=14",
+    "kafka-python>=2.0.2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.6",
+    "onnxruntime>=1.17",
+    "psycopg[binary,pool]>=3.1",
+    "prometheus-client>=0.20",
+]
+
+[project.optional-dependencies]
+train = [
+    "lightgbm>=4.3",
+    "onnxmltools>=1.12",
+    "onnxconverter-common>=1.14",
+    "skl2onnx>=1.16",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+]
+spark = ["pyspark==3.5.1"]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.2",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "pandas-stubs",
+    "types-requests",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+fraudpipe-replayer = "fraudpipe.replayer.__main__:main"
+fraudpipe-build-dataset = "fraudpipe.training.build_dataset:main"
+fraudpipe-train = "fraudpipe.training.train:main"
+fraudpipe-scorer-consumer = "fraudpipe.scorer.consumer:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-q --timeout=600"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+# Targets py310, NOT py311, even though the project itself requires 3.11.
+#
+# The shared feature module is imported by the Spark executors, whose Python is
+# whatever the Spark image ships (3.10 today). Targeting py311 let ruff's UP017
+# rewrite `timezone.utc` into `datetime.UTC` -- a 3.11-only API -- which lints
+# clean, passes every local test, and then dies on the executor with
+# "ImportError: cannot import name 'UTC' from 'datetime'".
+#
+# The linter has to target the oldest runtime any component uses, for the same
+# reason the feature code does. The build-time import check in
+# docker/Dockerfile.spark is the backstop.
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RET", "ARG", "PTH"]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "B008",    # FastAPI's Depends() pattern requires calls in defaults
+]
+
+[tool.ruff.lint.isort]
+# Declared explicitly rather than inferred. Whether `tests` counts as
+# first-party otherwise depends on how the project is laid out on disk and
+# whether it is pip-installed, so a local run and a CI run can disagree about
+# import order in the same file.
+known-first-party = ["fraudpipe", "tests", "scripts"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001"]  # pytest fixtures arrive as unused-looking arguments
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src", "tests"]
+strict = false
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+disallow_untyped_defs = false
+no_implicit_optional = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pyspark.*",
+    "lightgbm.*",
+    "onnxmltools.*",
+    "onnxconverter_common.*",
+    "onnxruntime.*",
+    "kafka.*",
+    "psycopg.*",
+    "psycopg_pool.*",
+    "prometheus_client.*",
+]
+ignore_missing_imports = true

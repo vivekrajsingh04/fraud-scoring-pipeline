@@ -1,0 +1,146 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # PySpark 3.5 does not support 3.12+. Pin once, here.
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev,train,spark]"
+      - name: ruff check
+        run: ruff check src tests scripts
+      - name: ruff format
+        run: ruff format --check src tests scripts
+      - name: mypy
+        run: mypy
+
+  unit:
+    name: unit tests + offline/online parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - name: feature unit tests
+        run: pytest tests/test_features_unit.py tests/test_replayer.py -v
+      - name: OFFLINE/ONLINE FEATURE PARITY
+        # The assertion this project exists to make. If training and serving can
+        # ever disagree on a feature value, the build stops here.
+        run: pytest tests/test_parity_offline_online.py -v
+
+  spark:
+    name: spark job on local[2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev,spark]"
+      - name: run the real streaming transformation against a fixture stream
+        run: pytest tests/test_spark_job.py -v
+        env:
+          # Spark's Arrow path needs this on JDK 17.
+          JDK_JAVA_OPTIONS: >-
+            --add-opens=java.base/java.lang=ALL-UNNAMED
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --add-opens=java.base/java.util=ALL-UNNAMED
+            --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
+  train-smoke:
+    name: training pipeline produces a valid ONNX model
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev,train]"
+      - name: build features, train, export and verify ONNX
+        # Runs on the fixture stream, not the 590k-row Kaggle dataset (which
+        # needs credentials). Proves the code path, not the model quality.
+        run: pytest tests/test_training_pipeline.py -v
+
+  compose-smoke:
+    name: docker build + end-to-end compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - run: pip install -e ".[dev,train]"
+
+      - name: train a model so the scorer has something to load
+        run: |
+          python scripts/make_fixture_csv.py --out data/fixture.csv --rows 4000
+          python -m fraudpipe.training.build_dataset \
+            --dataset normalized --path data/fixture.csv \
+            --out artifacts/features.parquet
+          python -m fraudpipe.training.train \
+            --features artifacts/features.parquet \
+            --model-out artifacts/model.onnx \
+            --metrics-out artifacts/metrics.json
+          echo "DECISION_THRESHOLD=$(python -c "import json;print(json.load(open('artifacts/metrics.json'))['chosen_threshold'])")" >> $GITHUB_ENV
+
+      - name: build images
+        # The compose file defaults to arm64 for Apple silicon; CI runners are
+        # amd64. One variable overrides it -- no second compose file.
+        run: docker compose build
+        env:
+          TARGET_PLATFORM: linux/amd64
+
+      - name: start the stack
+        run: docker compose up -d kafka postgres redis spark-master spark-worker feature-job scorer
+        env:
+          TARGET_PLATFORM: linux/amd64
+
+      - name: wait for the scorer to report healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/health; then echo; exit 0; fi
+            sleep 5
+          done
+          echo "scorer never became healthy"; docker compose logs --tail=200; exit 1
+
+      - name: SMOKE -- 100 events in, 100 decisions in Postgres
+        run: python scripts/smoke_compose.py --events 100 --timeout 240
+        env:
+          TARGET_PLATFORM: linux/amd64
+
+      - name: dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=400
+        env:
+          TARGET_PLATFORM: linux/amd64
+
+      - name: tear down
+        if: always()
+        run: docker compose down -v
+        env:
+          TARGET_PLATFORM: linux/amd64
